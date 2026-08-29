@@ -196,6 +196,30 @@ jobs:
           POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
           CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
+
+  # Dependency-failure chaos harness (#1116). Separate from the unit suite so
+  # graceful-degradation regressions surface as their own check without
+  # inflating unit runtime or coverage thresholds.
+  chaos:
+    name: Chaos degradation harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run dependency-failure chaos harness
+        run: npm run test:chaos -- --forceExit
+        env:
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
   # Catches "compiles but doesn't run" regressions (bad import path, missing
   # runtime asset like db/ migrations or openapi files) that tsc alone can't
   # see, since nothing else in this workflow boots the compiled dist/ output.
