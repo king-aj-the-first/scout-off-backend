@@ -819,6 +819,12 @@ describe('full migration sequence from scratch (#885)', () => {
     expect(cols).toContain('created_at');
   });
 
+  it("webhook_subscriptions has status and consecutive_failures from migration 028 (#1122)", () => {
+    const cols = columns('webhook_subscriptions');
+    expect(cols).toContain('status');
+    expect(cols).toContain('consecutive_failures');
+  });
+
   it("feature_flags table has expected columns from migration 010_feature_flags", () => {
     const cols = columns('feature_flags');
     expect(cols).toContain('name');

@@ -1,7 +1,13 @@
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { postWebhookWithRetry, signWebhookPayload, dispatchEventWebhook } from '../../src/services/webhooks';
-import { createWebhookSubscription, listWebhookDeadLetters } from '../../src/db';
+import {
+  createWebhookSubscription,
+  listWebhookDeadLetters,
+  listWebhookSubscriptions,
+  setWebhookSubscriptionStatus,
+  getWebhookSubscriptionById,
+} from '../../src/db';
 
 jest.mock('node-fetch', () => jest.fn());
 
@@ -287,4 +293,36 @@ describe('dispatchEventWebhook', () => {
     },
     15000
   );
+
+  it('skips paused subscriptions and resumes delivery after status is active again (#1122)', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFetch.mockResolvedValue({ ok: true, status: 200 } as any);
+    const url = uniqueUrl('pause-resume');
+    const secret = 'pause-resume-secret';
+    const sub = createWebhookSubscription(url, secret);
+
+    setWebhookSubscriptionStatus(sub.id, 'paused');
+    expect(listWebhookSubscriptions().find((s) => s.id === sub.id)).toBeUndefined();
+
+    await dispatchEventWebhook('player_registered', { wallet: 'PAUSED' });
+    expect(mockedFetch.mock.calls.find(([calledUrl]) => calledUrl === url)).toBeUndefined();
+
+    // Secret must be intact across pause/resume
+    const pausedRow = getWebhookSubscriptionById(sub.id);
+    expect(pausedRow?.status).toBe('paused');
+    expect(pausedRow?.secret).toBeTruthy();
+
+    setWebhookSubscriptionStatus(sub.id, 'active');
+    expect(listWebhookSubscriptions().find((s) => s.id === sub.id)).toBeDefined();
+
+    await dispatchEventWebhook('player_registered', { wallet: 'RESUMED' });
+    const call = mockedFetch.mock.calls.find(([calledUrl]) => calledUrl === url);
+    expect(call).toBeDefined();
+    const [, init] = call!;
+    const rawBody = init!.body as string;
+    expect((init!.headers as Record<string, string>)['X-Webhook-Signature']).toBe(
+      signWebhookPayload(rawBody, secret),
+    );
+    expect(JSON.parse(rawBody).payload).toEqual({ wallet: 'RESUMED' });
+  });
 });

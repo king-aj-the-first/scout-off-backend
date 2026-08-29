@@ -3,10 +3,14 @@ import crypto from 'crypto';
 import {
   listWebhookSubscriptions,
   insertWebhookDeadLetter,
+  incrementWebhookConsecutiveFailures,
+  resetWebhookConsecutiveFailures,
+  pauseWebhookSubscription,
   WebhookSubscription,
 } from '../db';
 import { logger } from '../utils/logger';
 import { recordWebhookDelivery } from '../middleware/metrics';
+import { logAuditEvent } from './audit';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
@@ -127,11 +131,12 @@ export async function postWebhookWithRetry(
 const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500, maxDelayMs: 5000 };
 
 /**
- * Dispatches an event to every registered webhook subscriber, signing each
- * delivery with that subscriber's own secret. If a delivery exhausts its
- * retries, it is persisted to the dead-letter queue (webhook_dead_letters)
- * instead of being dropped — this function itself never rejects on a
- * delivery failure so a slow/broken subscriber can't break the caller.
+ * Dispatches an event to every *active* webhook subscriber (#1122), signing
+ * each delivery with that subscriber's own secret. Paused subscriptions are
+ * excluded by listWebhookSubscriptions(). If a delivery exhausts its retries,
+ * it is persisted to the dead-letter queue instead of being dropped — this
+ * function itself never rejects on a delivery failure so a slow/broken
+ * subscriber can't break the caller.
  */
 export async function dispatchEventWebhook(eventType: string, payload: unknown): Promise<void> {
   const subscriptions = listWebhookSubscriptions();
@@ -162,6 +167,7 @@ async function deliverToSubscription(
       secret: subscription.secret,
     });
     recordWebhookDelivery('success');
+    resetWebhookConsecutiveFailures(subscription.id);
   } catch (err) {
     const failureReason = err instanceof Error ? err.message : String(err);
     logger.warn(
@@ -177,5 +183,31 @@ async function deliverToSubscription(
       attempts: RETRY_OPTIONS.retries,
     });
     recordWebhookDelivery('dead_letter');
+
+    const failures = incrementWebhookConsecutiveFailures(subscription.id);
+    const threshold = config.webhook.autoPauseFailureCount;
+    if (threshold > 0 && failures >= threshold) {
+      pauseWebhookSubscription(subscription.id);
+      logger.warn(
+        `[webhooks] auto-paused subscription after ${failures} consecutive failures — subscriptionId=${subscription.id} url=${subscription.url}`,
+      );
+      // Best-effort audit — do not block dispatch on audit persistence.
+      logAuditEvent({
+        action: 'webhook_subscription_auto_paused',
+        timestamp: new Date().toISOString(),
+        adminWallet: subscription.scout_wallet ?? 'system',
+        queryParams: {
+          subscriptionId: subscription.id,
+          url: subscription.url,
+          consecutiveFailures: failures,
+          threshold,
+          eventType,
+        },
+      }).catch((auditErr) => {
+        logger.warn(
+          `[webhooks] failed to audit auto-pause — subscriptionId=${subscription.id} error=${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+        );
+      });
+    }
   }
 }

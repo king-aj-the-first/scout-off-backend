@@ -41,6 +41,7 @@ not a directory listing.
 | --- | -------- | ----------- |
 | [runbook.md](runbook.md) | Operator | Incident → action runbook: indexer lag, wrong tiers, webhook failures, RPC/IPFS outages, DB slowness, reindex/replay, dead-letter drain, cache flush, circuit breaker, pause/unpause |
 | [performance.md](performance.md) | Contributor | Latency budgets for key endpoints and how to run the load-test suites |
+| [degradation-contracts.md](degradation-contracts.md) | Contributor | Graceful-degradation contracts per route group when Redis/DB/RPC/IPFS fail; asserted by `npm run test:chaos` |
 
 ## Not in this directory
 

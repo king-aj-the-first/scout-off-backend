@@ -131,6 +131,22 @@ jobs:
           name: coverage-report
           path: coverage/
 
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run chaos degradation harness (#1116)
+        run: npm run test:chaos
+        env:
+          JWT_SECRET: test-secret-for-ci-chaos-harness-32chars
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
   # Runs the same suite as `test` above but against a real PostgreSQL service
   # container with DB_DRIVER=postgres, so the Postgres driver path (#1014)
   # can never silently regress. Excludes only the test files that exercise
@@ -194,6 +210,30 @@ jobs:
           DB_DRIVER: postgres
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
           POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
+
+  # Dependency-failure chaos harness (#1116). Separate from the unit suite so
+  # graceful-degradation regressions surface as their own check without
+  # inflating unit runtime or coverage thresholds.
+  chaos:
+    name: Chaos degradation harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run dependency-failure chaos harness
+        run: npm run test:chaos -- --forceExit
+        env:
           CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
   # Catches "compiles but doesn't run" regressions (bad import path, missing

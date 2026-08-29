@@ -12,8 +12,9 @@ try {
   // Verify native bindings by instantiating an in-memory DB
   try {
     new Better(':memory:').close();
-    console.log('[test-runner] better-sqlite3 native bindings usable; running full test suite');
-    runJest([]);
+    console.log('[test-runner] better-sqlite3 native bindings usable; running unit+scripts suites');
+    // Chaos harness (#1116) is a separate CI job — see `npm run test:chaos`.
+    runJest(['--selectProjects', 'unit', 'scripts']);
   } catch (e) {
     console.warn('[test-runner] better-sqlite3 module present but native bindings unusable; running the parity script test only');
     runJest(['tests/scripts/apiVersionParity.test.ts']);

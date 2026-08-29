@@ -4,15 +4,19 @@ import {
   listWebhookDeadLetters,
   countWebhookDeadLetters,
   getWebhookDeadLetterById,
-  listWebhookSubscriptions,
+  getWebhookSubscriptionById,
+  setWebhookSubscriptionStatus,
   markWebhookDeadLetterReplayed,
   updateWebhookDeadLetterAttempt,
   deleteWebhookDeadLetter,
   purgeOldWebhookDeadLetters,
+  type WebhookSubscriptionStatus,
 } from '../db';
 import { postWebhookWithRetry } from '../services/webhooks';
+import { decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { logger } from '../utils/logger';
 import { incrementWebhookRetrySuccessTotal } from '../middleware/metrics';
+import { logAuditEvent } from '../services/audit';
 
 /** Exported so routes can apply validateQuery(listDeadLettersQuerySchema) */
 export const listDeadLettersQuerySchema = z.object({
@@ -95,17 +99,19 @@ try {
       return;
     }
 
-    const subscriptions = listWebhookSubscriptions();
-    const subscription =
-      subscriptions.find((s) => s.id === deadLetter.subscription_id) ??
-      subscriptions.find((s) => s.url === deadLetter.url);
+    const subscription = deadLetter.subscription_id != null
+      ? getWebhookSubscriptionById(deadLetter.subscription_id)
+      : undefined;
+    const secret = subscription
+      ? decryptWebhookSecret(subscription.secret)
+      : undefined;
 
     try {
       await postWebhookWithRetry(deadLetter.url, JSON.parse(deadLetter.payload), {
         retries: 3,
         baseDelayMs: 500,
         maxDelayMs: 5000,
-        secret: subscription?.secret,
+        secret,
       });
 
       markWebhookDeadLetterReplayed(id);
@@ -190,6 +196,82 @@ export async function purgeOldDeadLetters(req: Request, res: Response, next: Nex
     message: `Purged ${deleted} dead letter(s) older than ${olderThanDays} day(s)`,
     data: { deleted, olderThanDays },
   });
+}
+
+// ─── PATCH /api/admin/webhooks/subscriptions/:id ─────────────────────────────
+
+const patchSubscriptionSchema = z.object({
+  status: z.enum(['active', 'paused']),
+});
+
+const subscriptionIdSchema = z.object({
+  id: z.coerce.number().int().positive('id must be a positive integer'),
+});
+
+/**
+ * PATCH /api/admin/webhooks/subscriptions/:id
+ *
+ * Admin override to pause or resume any webhook subscription without rotating
+ * its HMAC secret (#1122).
+ *
+ * @body { status: 'active' | 'paused' }
+ * @response 200 { success: true, data: { id, url, status, scoutWallet, createdAt } }
+ * @response 400 Invalid id or body
+ * @response 404 Subscription not found
+ * @auth Bearer (admin role required)
+ */
+export async function patchWebhookSubscription(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsedParams = subscriptionIdSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      res.status(400).json({
+        success: false,
+        error: parsedParams.error.errors[0]?.message ?? 'Invalid id',
+      });
+      return;
+    }
+
+    const parsedBody = patchSubscriptionSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      res.status(400).json({
+        success: false,
+        error: parsedBody.error.errors[0]?.message ?? 'Invalid request body',
+      });
+      return;
+    }
+
+    const { id } = parsedParams.data;
+    const status = parsedBody.data.status as WebhookSubscriptionStatus;
+    const updated = setWebhookSubscriptionStatus(id, status);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Webhook subscription not found' });
+      return;
+    }
+
+    await logAuditEvent({
+      action: 'webhook_subscription_status_updated',
+      timestamp: new Date().toISOString(),
+      adminWallet: req.account,
+      queryParams: { subscriptionId: id, status, url: updated.url },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        id: updated.id,
+        url: updated.url,
+        status: updated.status,
+        scoutWallet: updated.scout_wallet,
+        createdAt: updated.created_at,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 }
 
 // ─── Legacy replay alias (kept for backwards compatibility) ──────────────────

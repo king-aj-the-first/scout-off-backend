@@ -5,7 +5,7 @@ import { importPlayers } from '../controllers/adminPlayerImportController';
 import { adminDeactivatePlayer, adminReactivatePlayer } from '../controllers/adminPlayerDeactivationController';
 import { getFeatureFlags, updateFeatureFlag, toggleFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
-import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLetter, purgeDeadLetter } from '../controllers/webhookAdminController';
+import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLetter, purgeDeadLetter, patchWebhookSubscription } from '../controllers/webhookAdminController';
 import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
 import { triggerReindex, reindexStatusHandler } from '../controllers/reindexController';
 import { requireRole } from '../middleware/auth';
@@ -594,6 +594,23 @@ router.route('/webhooks/dead-letters/:id/requeue')
 router.route('/webhooks/dead-letters/:id')
   .delete(requireRole('admin'), purgeDeadLetter)
   .all(methodNotAllowed(['DELETE']));
+
+/**
+ * PATCH /api/admin/webhooks/subscriptions/:id
+ *
+ * Admin override to pause or resume any webhook subscription without rotating
+ * its HMAC secret (#1122).
+ *
+ * @param id {integer} - Webhook subscription row ID
+ * @body { status: 'active' | 'paused' }
+ * @response 200 { success: true, data: { id, url, status, scoutWallet, createdAt } }
+ * @response 400 { success: false, error: string } - Invalid id or body
+ * @response 404 { success: false, error: string } - Not found
+ * @auth Bearer (admin role required)
+ */
+router.route('/webhooks/subscriptions/:id')
+  .patch(requireRole('admin'), patchWebhookSubscription)
+  .all(methodNotAllowed(['PATCH']));
 
 /**
  * POST /api/admin/webhooks/:id/replay

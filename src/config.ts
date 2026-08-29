@@ -343,6 +343,16 @@ const config = {
      * indefinitely.
      */
     timeoutMs: parseNumericEnv('WEBHOOK_TIMEOUT_MS', process.env.WEBHOOK_TIMEOUT_MS, 10000, { min: 1, integer: true }),
+    /**
+     * Auto-pause a subscription after this many consecutive dead-lettered
+     * deliveries (#1122). 0 disables auto-pause (manual pause/resume only).
+     */
+    autoPauseFailureCount: parseNumericEnv(
+      'WEBHOOK_AUTO_PAUSE_FAILURE_COUNT',
+      process.env.WEBHOOK_AUTO_PAUSE_FAILURE_COUNT,
+      0,
+      { min: 0, integer: true },
+    ),
   },
   // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
   // webhook_subscriptions.secret at rest (#686). Required in production —

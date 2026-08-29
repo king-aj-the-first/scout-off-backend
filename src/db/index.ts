@@ -2581,12 +2581,18 @@ export async function getAdminActionSignatures(action_id: string): Promise<{ sig
 // that receives outbound event webhooks; `secret` is the per-subscriber HMAC
 // key used to sign every delivery (see src/services/webhooks.ts, docs/webhooks.md).
 
+/** Delivery status for a webhook subscription (#1122). */
+export type WebhookSubscriptionStatus = 'active' | 'paused';
+
 export interface WebhookSubscription {
   id: number;
   url: string;
   secret: string;
   scout_wallet: string | null;
   event_types: string | null; // JSON array of ContractEventType strings, or null = all
+  /** 'active' receives deliveries; 'paused' is quarantined (#1122). */
+  status: WebhookSubscriptionStatus;
+  consecutive_failures: number;
   created_at: string;
 }
 
@@ -2611,18 +2617,29 @@ export function createWebhookSubscription(
       secret: finalSecret,
       scout_wallet: scoutWallet ?? null,
       event_types: eventTypesJson,
+      status: 'active' as WebhookSubscriptionStatus,
+      consecutive_failures: 0,
       created_at: new Date().toISOString(),
     };
   });
 }
 
+/**
+ * Lists webhook subscriptions that should receive deliveries (#1122).
+ * Paused rows are excluded so dispatchEventWebhook skips quarantined endpoints.
+ * Secrets are decrypted in memory for signing — never persisted.
+ */
 export function listWebhookSubscriptions(): WebhookSubscription[] {
-  const sql = 'SELECT * FROM webhook_subscriptions ORDER BY id ASC';
+  const sql =
+    "SELECT * FROM webhook_subscriptions WHERE status = 'active' OR status IS NULL ORDER BY id ASC";
   return timedQuery(sql, () => {
     const rows = getDb().prepare(sql).all() as WebhookSubscription[];
-    // Decrypted only here, in memory, immediately before the caller signs a
-    // delivery with it (src/services/webhooks.ts) — never persisted.
-    return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+    return rows.map((row) => ({
+      ...row,
+      status: (row.status ?? 'active') as WebhookSubscriptionStatus,
+      consecutive_failures: row.consecutive_failures ?? 0,
+      secret: decryptWebhookSecret(row.secret),
+    }));
   });
 }
 
@@ -2634,20 +2651,31 @@ export function listWebhookSubscriptions(): WebhookSubscription[] {
  */
 export function getWebhookSubscriptionById(id: number): WebhookSubscription | undefined {
   const sql = 'SELECT * FROM webhook_subscriptions WHERE id = ?';
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).get(id) as WebhookSubscription | undefined,
-  );
+  return timedQuery(sql, () => {
+    const row = getDb().prepare(sql).get(id) as WebhookSubscription | undefined;
+    if (!row) return undefined;
+    return {
+      ...row,
+      status: (row.status ?? 'active') as WebhookSubscriptionStatus,
+      consecutive_failures: row.consecutive_failures ?? 0,
+    };
+  });
 }
 
 /**
- * List all webhook subscriptions owned by a specific scout wallet.
- * Secrets are returned encrypted — decrypt before use.
+ * List all webhook subscriptions owned by a specific scout wallet (including
+ * paused ones so the owner can resume). Secrets are returned encrypted.
  */
 export function getWebhookSubscriptionsByScout(scoutWallet: string): WebhookSubscription[] {
   const sql = 'SELECT * FROM webhook_subscriptions WHERE scout_wallet = ? ORDER BY id ASC';
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as WebhookSubscription[],
-  );
+  return timedQuery(sql, () => {
+    const rows = getDb().prepare(sql).all(scoutWallet) as WebhookSubscription[];
+    return rows.map((row) => ({
+      ...row,
+      status: (row.status ?? 'active') as WebhookSubscriptionStatus,
+      consecutive_failures: row.consecutive_failures ?? 0,
+    }));
+  });
 }
 
 /**
@@ -2659,6 +2687,78 @@ export function deleteWebhookSubscription(id: number, scoutWallet: string): bool
   return timedQuery(sql, () => {
     const info = getDb().prepare(sql).run(id, scoutWallet);
     return info.changes > 0;
+  });
+}
+
+/**
+ * Set status for a webhook subscription (#1122). Does not touch the secret.
+ * Returns the updated row, or undefined when not found.
+ */
+export function setWebhookSubscriptionStatus(
+  id: number,
+  status: WebhookSubscriptionStatus,
+): WebhookSubscription | undefined {
+  const sql = 'UPDATE webhook_subscriptions SET status = ? WHERE id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(status, id);
+    if (info.changes === 0) return undefined;
+    return getWebhookSubscriptionById(id);
+  });
+}
+
+/**
+ * Owner-scoped status update (#1122). Returns undefined when not found or
+ * owned by another scout. Secret is left intact across pause/resume.
+ */
+export function setWebhookSubscriptionStatusForScout(
+  id: number,
+  scoutWallet: string,
+  status: WebhookSubscriptionStatus,
+): WebhookSubscription | undefined {
+  const sql = 'UPDATE webhook_subscriptions SET status = ? WHERE id = ? AND scout_wallet = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(status, id, scoutWallet);
+    if (info.changes === 0) return undefined;
+    return getWebhookSubscriptionById(id);
+  });
+}
+
+/**
+ * Increment consecutive_failures after a dead-lettered delivery. Returns the
+ * new count (0 when the row is missing).
+ */
+export function incrementWebhookConsecutiveFailures(id: number): number {
+  const sql =
+    'UPDATE webhook_subscriptions SET consecutive_failures = consecutive_failures + 1 WHERE id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id);
+    if (info.changes === 0) return 0;
+    const row = getDb()
+      .prepare('SELECT consecutive_failures FROM webhook_subscriptions WHERE id = ?')
+      .get(id) as { consecutive_failures: number } | undefined;
+    return row?.consecutive_failures ?? 0;
+  });
+}
+
+/** Reset consecutive_failures after a successful delivery. */
+export function resetWebhookConsecutiveFailures(id: number): void {
+  const sql = 'UPDATE webhook_subscriptions SET consecutive_failures = 0 WHERE id = ?';
+  timedQuery(sql, () => {
+    getDb().prepare(sql).run(id);
+  });
+}
+
+/**
+ * Pause a subscription and zero the failure counter (used by auto-pause).
+ * Secret is preserved. Returns the updated row or undefined if missing.
+ */
+export function pauseWebhookSubscription(id: number): WebhookSubscription | undefined {
+  const sql =
+    "UPDATE webhook_subscriptions SET status = 'paused', consecutive_failures = 0 WHERE id = ?";
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id);
+    if (info.changes === 0) return undefined;
+    return getWebhookSubscriptionById(id);
   });
 }
 
