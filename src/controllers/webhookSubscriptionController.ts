@@ -19,6 +19,8 @@ import {
   getWebhookSubscriptionsByScout,
   getWebhookSubscriptionById,
   deleteWebhookSubscription,
+  setWebhookSubscriptionStatusForScout,
+  type WebhookSubscriptionStatus,
 } from '../db';
 import { decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { signWebhookPayload } from '../services/webhooks';
@@ -57,6 +59,12 @@ export const registerWebhookSchema = z.object({
 
 export type RegisterWebhookRequest = z.infer<typeof registerWebhookSchema>;
 
+export const patchWebhookSchema = z.object({
+  status: z.enum(['active', 'paused']),
+});
+
+export type PatchWebhookRequest = z.infer<typeof patchWebhookSchema>;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Mask a plaintext secret for safe display in list responses. */
@@ -65,7 +73,14 @@ function maskSecret(plaintext: string): string {
 }
 
 function serializeSubscription(
-  row: { id: number; url: string; secret: string; event_types: string | null; created_at: string },
+  row: {
+    id: number;
+    url: string;
+    secret: string;
+    event_types: string | null;
+    status?: WebhookSubscriptionStatus | null;
+    created_at: string;
+  },
   opts: { revealSecret?: boolean } = {},
 ) {
   const plaintext = decryptWebhookSecret(row.secret);
@@ -74,6 +89,7 @@ function serializeSubscription(
     url: row.url,
     secret: opts.revealSecret ? plaintext : maskSecret(plaintext),
     eventTypes: row.event_types ? (JSON.parse(row.event_types) as string[]) : null,
+    status: (row.status ?? 'active') as WebhookSubscriptionStatus,
     createdAt: row.created_at,
   };
 }
@@ -131,6 +147,7 @@ export async function registerWebhook(
       eventTypes: subscription.event_types
         ? (JSON.parse(subscription.event_types) as string[])
         : null,
+      status: subscription.status,
       createdAt: subscription.created_at,
     },
   });
@@ -190,6 +207,62 @@ export async function deleteWebhook(
   logger.info({ scout: req.params.wallet as string, subscriptionId: id, action: 'webhook_deleted' });
 
   res.json({ success: true, data: { removed: true, id } });
+}
+
+/**
+ * PATCH /api/scouts/:wallet/webhooks/:id
+ *
+ * Pause or resume a webhook subscription without rotating its HMAC secret
+ * (#1122). Scoped to the owning scout wallet.
+ *
+ * @body { status: 'active' | 'paused' }
+ * @response 200 { success: true, data: { id, url, secret (masked), eventTypes, status, createdAt } }
+ * @response 400 Invalid id or body
+ * @response 403 Wallet mismatch
+ * @response 404 Subscription not found
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function patchWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid subscription id' });
+    return;
+  }
+
+  const parsed = patchWebhookSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
+
+  const updated = setWebhookSubscriptionStatusForScout(
+    id,
+    req.params.wallet as string,
+    parsed.data.status,
+  );
+  if (!updated) {
+    res.status(404).json({ success: false, error: 'Webhook subscription not found' });
+    return;
+  }
+
+  logger.info({
+    scout: req.params.wallet as string,
+    subscriptionId: id,
+    status: parsed.data.status,
+    action: 'webhook_status_updated',
+  });
+
+  res.json({
+    success: true,
+    data: serializeSubscription(updated),
+  });
 }
 
 /**

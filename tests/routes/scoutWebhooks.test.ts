@@ -61,6 +61,7 @@ jest.mock('../../src/db', () => ({
   getWebhookSubscriptionsByScout: jest.fn(),
   getWebhookSubscriptionById: jest.fn(),
   deleteWebhookSubscription: jest.fn(),
+  setWebhookSubscriptionStatusForScout: jest.fn(),
 }));
 
 jest.mock('../../src/services/stellar', () => ({
@@ -87,12 +88,14 @@ import {
   getWebhookSubscriptionsByScout,
   getWebhookSubscriptionById,
   deleteWebhookSubscription,
+  setWebhookSubscriptionStatusForScout,
 } from '../../src/db';
 
 const mockCreate   = createWebhookSubscription   as jest.Mock;
 const mockListByScout = getWebhookSubscriptionsByScout as jest.Mock;
 const mockGetById  = getWebhookSubscriptionById  as jest.Mock;
 const mockDelete   = deleteWebhookSubscription   as jest.Mock;
+const mockSetStatus = setWebhookSubscriptionStatusForScout as jest.Mock;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -110,7 +113,7 @@ const scoutBToken = makeToken(SCOUT_B);
 /** A mock subscription row as returned by createWebhookSubscription */
 function mockSubscription(overrides: Partial<{
   id: number; url: string; secret: string; scout_wallet: string;
-  event_types: string | null; created_at: string;
+  event_types: string | null; status: 'active' | 'paused'; created_at: string;
 }> = {}) {
   return {
     id: 1,
@@ -118,6 +121,8 @@ function mockSubscription(overrides: Partial<{
     secret: 'plaintext-secret-hex-32bytes-0000',
     scout_wallet: SCOUT_A,
     event_types: null,
+    status: 'active' as const,
+    consecutive_failures: 0,
     created_at: '2026-07-28T00:00:00.000Z',
     ...overrides,
   };
@@ -126,7 +131,7 @@ function mockSubscription(overrides: Partial<{
 /** A mock row as returned by getWebhookSubscriptionById — secret is encrypted */
 function mockSubscriptionRow(overrides: Partial<{
   id: number; url: string; secret: string; scout_wallet: string;
-  event_types: string | null; created_at: string;
+  event_types: string | null; status: 'active' | 'paused'; created_at: string;
 }> = {}) {
   // Use a simple non-encrypted secret for the mock (decryptWebhookSecret is
   // a pass-through for values not starting with 'v1:')
@@ -136,6 +141,8 @@ function mockSubscriptionRow(overrides: Partial<{
     secret: 'rawsecret1234',
     scout_wallet: SCOUT_A,
     event_types: null,
+    status: 'active' as const,
+    consecutive_failures: 0,
     created_at: '2026-07-28T00:00:00.000Z',
     ...overrides,
   };
@@ -349,6 +356,71 @@ describe('DELETE /api/scouts/:wallet/webhooks/:id', () => {
       .delete(`/api/scouts/${SCOUT_A}/webhooks/1`);
 
     expect(res.status).toBe(401);
+  });
+});
+
+// ─── PATCH /api/scouts/:wallet/webhooks/:id ───────────────────────────────────
+
+describe('PATCH /api/scouts/:wallet/webhooks/:id', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('pauses a subscription and returns updated status', async () => {
+    mockSetStatus.mockReturnValueOnce(mockSubscriptionRow({ status: 'paused' }));
+
+    const res = await request(app)
+      .patch(`/api/scouts/${SCOUT_A}/webhooks/1`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ status: 'paused' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.status).toBe('paused');
+    expect(res.body.data.secret).toMatch(/^sha256:\*{4}/);
+    expect(mockSetStatus).toHaveBeenCalledWith(1, SCOUT_A, 'paused');
+  });
+
+  it('resumes a paused subscription', async () => {
+    mockSetStatus.mockReturnValueOnce(mockSubscriptionRow({ status: 'active' }));
+
+    const res = await request(app)
+      .patch(`/api/scouts/${SCOUT_A}/webhooks/1`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ status: 'active' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('active');
+    expect(mockSetStatus).toHaveBeenCalledWith(1, SCOUT_A, 'active');
+  });
+
+  it('returns 400 for invalid status', async () => {
+    const res = await request(app)
+      .patch(`/api/scouts/${SCOUT_A}/webhooks/1`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ status: 'disabled' });
+
+    expect(res.status).toBe(400);
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when subscription not found', async () => {
+    mockSetStatus.mockReturnValueOnce(undefined);
+
+    const res = await request(app)
+      .patch(`/api/scouts/${SCOUT_A}/webhooks/999`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ status: 'paused' });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 403 when scout B tries to pause scout A subscription', async () => {
+    const res = await request(app)
+      .patch(`/api/scouts/${SCOUT_A}/webhooks/1`)
+      .set('Authorization', `Bearer ${scoutBToken}`)
+      .send({ status: 'paused' });
+
+    expect(res.status).toBe(403);
+    expect(mockSetStatus).not.toHaveBeenCalled();
   });
 });
 

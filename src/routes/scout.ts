@@ -38,6 +38,7 @@ import {
   registerWebhook,
   listWebhooks,
   deleteWebhook,
+  patchWebhook,
   testWebhook,
 } from '../controllers/webhookSubscriptionController';
 import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
@@ -691,10 +692,21 @@ router.route('/:wallet/webhooks')
  * @response 403 { success: false, error: string } - Wallet mismatch
  * @response 404 { success: false, error: string } - Subscription not found
  * @auth Bearer (scout role required; wallet must match authenticated account)
+ *
+ * PATCH /api/scouts/:wallet/webhooks/:id
+ * Pause or resume a subscription without rotating its HMAC secret (#1122).
+ *
+ * @body { status: 'active' | 'paused' }
+ * @response 200 { success: true, data: { id, url, secret, eventTypes, status, createdAt } }
+ * @response 400 { success: false, error: string } - Invalid id or body
+ * @response 403 { success: false, error: string } - Wallet mismatch
+ * @response 404 { success: false, error: string } - Subscription not found
+ * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/webhooks/:id')
   .delete(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), deleteWebhook)
-  .all(methodNotAllowed(['DELETE']));
+  .patch(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), patchWebhook)
+  .all(methodNotAllowed(['DELETE', 'PATCH']));
 
 /**
  * POST /api/scouts/:wallet/webhooks/:id/test
