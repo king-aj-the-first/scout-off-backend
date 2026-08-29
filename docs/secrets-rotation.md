@@ -2,6 +2,24 @@
 
 This document outlines the rotation policy, cadence, and step-by-step procedures for every long-lived secret used by the ScoutOff backend. Managing and rotating these secrets on a defined schedule is critical to preserving the security and integrity of the platform.
 
+## SecretsProvider (#1115)
+
+| `SECRETS_PROVIDER` | Behaviour |
+|---|---|
+| `env` (default) | Reads `process.env` |
+| `vault` | Vault KV (`VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_SECRET_PATH`) |
+| `kms` | HTTP secret bundle (`KMS_SECRET_BUNDLE_URL`, `KMS_BEARER_TOKEN`) |
+
+`get` / `refresh` / `apply` emit `[secrets-audit]` logs (name only, never values). Use `refreshSecrets(config)` for in-place reload with vault/kms.
+
+### Rotation classes
+
+| Class | Meaning |
+|---|---|
+| **hot** | Refresh / rolling restart |
+| **dual-window** | Current + previous accepted (`JWT_SECRET`, `SEP10_SERVER_SECRET`, `API_KEY_LOOKUP_SECRET`) |
+| **migration-required** | Needs tooling (e.g. `npm run reencrypt-webhook-secrets` for `WEBHOOK_SECRET_ENCRYPTION_KEY`) |
+
 ---
 
 ## Documented Secrets Summary
