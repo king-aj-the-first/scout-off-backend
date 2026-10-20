@@ -75,7 +75,7 @@ RUN mkdir -p /data && chown appuser:appgroup /data
 
 USER appuser
 
-# Expose the default API port
+# Expose the default API port (documentation only; actual port is $PORT at runtime)
 EXPOSE 4000
 
 # Set default DB path to the /data volume mount
@@ -85,6 +85,6 @@ ENV DB_PATH=/data/scout-off.db \
     GIT_COMMIT=$GIT_COMMIT
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:4000/health/liveness || exit 1
+  CMD wget -qO- "http://localhost:${PORT:-4000}/health/liveness" || exit 1
 
 CMD ["node", "dist/index.js"]
