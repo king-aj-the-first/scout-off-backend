@@ -2744,7 +2744,10 @@ export interface BookmarkedPlayerRow extends PlayerRow {
 export async function getBookmarkedPlayersWithDetails(
   scoutWallet: string,
   folderId?: number | null,
+  opts?: { limit?: number; offset?: number },
 ): Promise<BookmarkedPlayerRow[]> {
+  const limit = opts?.limit;
+  const offset = opts?.offset;
   let sql: string;
   let params: (string | number | null)[];
 
@@ -2776,7 +2779,45 @@ export async function getBookmarkedPlayersWithDetails(
     params = [scoutWallet];
   }
 
+  if (limit !== undefined) {
+    sql += ` LIMIT ? OFFSET ?`;
+    params.push(limit, offset ?? 0);
+  }
+
   return timedQueryAsync(sql, () => getDriver().all<BookmarkedPlayerRow>(sql, params));
+}
+
+/**
+ * Count bookmarked players for a scout (JOIN variant so orphans excluded,
+ * matching getBookmarkedPlayersWithDetails). Used for pagination metadata.
+ */
+export async function countBookmarkedPlayers(
+  scoutWallet: string,
+  folderId?: number | null,
+): Promise<number> {
+  let sql: string;
+  let params: (string | number | null)[];
+
+  if (folderId !== undefined) {
+    sql = `
+      SELECT COUNT(*) AS cnt
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ? AND b.folder_id = ?
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT COUNT(*) AS cnt
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ?
+    `;
+    params = [scoutWallet];
+  }
+
+  const rows = await timedQueryAsync(sql, () => getDriver().all<{ cnt: number }>(sql, params));
+  return Number(rows[0]?.cnt ?? 0);
 }
 
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────
