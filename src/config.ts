@@ -89,11 +89,19 @@ function isLikelyPlaceholderSecret(secret: string): boolean {
     'replace_me',
     'secret',
     'mysecret',
+    'my-secret',
     'test-secret',
     'development-secret',
   ];
 
-  return obviousPlaceholders.some((placeholder) => normalized === placeholder || normalized.includes(placeholder));
+  if ((obviousPlaceholders as string[]).includes(normalized)) return true;
+
+  // Decorated placeholder forms: optional prefix/suffix around a known stem,
+  // with only trivial decoration (separators, digits). Long real secrets that
+  // merely contain e.g. "secret" as a substring must NOT match.
+  const decoratedPlaceholder =
+    /^(change[-_]?me|replace[-_]?me|example([-_]secret)?|(my|test|development)?[-_]?secret|jwt[-_]?secret)[\-_0-9]*$/;
+  return decoratedPlaceholder.test(normalized);
 }
 
 function validateSecretStrength(name: string, value: string): void {
